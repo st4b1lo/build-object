@@ -1,67 +1,76 @@
 import ipaddress
+from pathlib import Path
 
-# Asks for the name of the file that contains IP or FQDN
-input_file = input("Enter the name of the file to process: ")
-output_file = "formatted_objects.txt"
+def process(input_path: Path, output_path: Path,
+            group4_name="Malicious_v4_fqdn", group6_name="Malicious_v6"):
+    items_v4_or_fqdn = []
+    items_v6 = []
 
-# We will keep counters for how many entries are IPs and how many are FQDNs
-count_ip = 0
-count_fqdn = 0
+    lines = input_path.read_text(encoding="utf-8").splitlines()
+    with output_path.open("w", encoding="utf-8") as outfile:
+        # IPv4 e FQDN
+        outfile.write("config firewall address\n")
+        for raw in lines:
+            entry = raw.strip()
+            if not entry or entry.startswith("#") or entry.startswith("==="):
+                continue
+            try:
+                iface = ipaddress.ip_interface(entry)
+                if isinstance(iface.ip, ipaddress.IPv4Address):
+                    name = entry if "/" in entry else f"{iface.ip}/32"
+                    outfile.write(f'    edit "{name}"\n')
+                    outfile.write(f"        set subnet {iface.ip} {iface.network.netmask}\n")
+                    outfile.write("    next\n")
+                    items_v4_or_fqdn.append(name)
+                # IPv6 lo gestiamo dopo
+            except ValueError:
+                # FQDN
+                name = entry
+                outfile.write(f'    edit "{name}"\n')
+                outfile.write("        set type fqdn\n")
+                outfile.write(f'        set fqdn "{name}"\n')
+                outfile.write("    next\n")
+                items_v4_or_fqdn.append(name)
+        outfile.write("end\n\n")
 
-# This list will hold the final names actually used in 'edit' and in the group
-processed_items = []
+        # IPv6 in modalità prefisso
+        outfile.write("config firewall address6\n")
+        for raw in lines:
+            entry = raw.strip()
+            if not entry or entry.startswith("#") or entry.startswith("==="):
+                continue
+            try:
+                iface = ipaddress.ip_interface(entry if "/" in entry else f"{entry}/128")
+                if isinstance(iface.ip, ipaddress.IPv6Address):
+                    name = entry if "/" in entry else f"{iface.ip}/128"
+                    cidr = name
+                    outfile.write(f'    edit "{name}"\n')
+                    outfile.write(f"        set ip6 {cidr}\n")
+                    outfile.write("    next\n")
+                    items_v6.append(name)
+            except ValueError:
+                pass
+        outfile.write("end\n\n")
 
-with open(input_file, "r") as infile, open(output_file, "w") as outfile:
-    for line in infile:
-        entry = line.strip()
-        if not entry:
-            continue  # ignore empty lines
+        # Gruppi
+        if items_v4_or_fqdn:
+            members4 = " ".join(f'"{m}"' for m in items_v4_or_fqdn)
+            outfile.write("config firewall addrgrp\n")
+            outfile.write(f'    edit "{group4_name}"\n')
+            outfile.write(f"        set member {members4}\n")
+            outfile.write("    next\n")
+            outfile.write("end\n\n")
+        if items_v6:
+            members6 = " ".join(f'"{m}"' for m in items_v6)
+            outfile.write("config firewall addrgrp6\n")
+            outfile.write(f'    edit "{group6_name}"\n')
+            outfile.write(f"        set member {members6}\n")
+            outfile.write("    next\n")
+            outfile.write("end\n")
 
-        try:
-            # Attempt to parse the string as an IP (with or without slash) using ip_interface
-            iface = ipaddress.ip_interface(entry)
-            ip_str = str(iface.ip)
-            netmask_str = str(iface.network.netmask)
-
-            # If the user already specified a slash, we keep that name.
-            # Otherwise, if it's /32, we append /32 to the name (e.g., 1.2.3.4 -> 1.2.3.4/32)
-            # In all other cases, we keep the entry as is.
-
-            if "/" in entry:
-                name_for_edit = entry
-            else:
-                if netmask_str == "255.255.255.255":
-                    name_for_edit = ip_str + "/32"
-                else:
-                    name_for_edit = entry
-
-            outfile.write(f"edit {name_for_edit}\n")
-            outfile.write(f"set subnet {ip_str} {netmask_str}\n")
-            outfile.write("next\n")
-
-            processed_items.append(name_for_edit)
-            count_ip += 1
-
-        except ValueError:
-            # If a ValueError is raised, it's not a valid IP (or IP with slash), so treat it as an FQDN
-            outfile.write(f"edit {entry}\n")
-            outfile.write(f"set fqdn {entry}\n")
-            outfile.write("next\n")
-
-            processed_items.append(entry)
-            count_fqdn += 1
-
-    # Adds the final command with all the newly created objects
-    outfile.write("config firewall addrgrp\n")
-    outfile.write("edit Malicous\n")
-
-    # Build the list of members with quotes around each IP/FQDN
-    member_list = " ".join(f'"{item}"' for item in processed_items)
-    outfile.write(f"set member {member_list}\n")
-    outfile.write("end\n")
-
-# After processing, print a summary to the console
-print("Processing complete!")
-print(f"Total entries processed: {count_ip + count_fqdn}")
-print(f"- IP addresses: {count_ip}")
-print(f"- FQDNs: {count_fqdn}")
+if __name__ == "__main__":
+    file_in = input("Enter the name of the file to process: ").strip()
+    input_path = Path(file_in)
+    output_path = Path("formatted_objects.txt")
+    process(input_path, output_path)
+    print(f"\nProcessing complete! Output saved in {output_path.resolve()}")
